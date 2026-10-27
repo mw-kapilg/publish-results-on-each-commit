@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  checks: write # publish test results as a check run on the commit
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,3 +25,60 @@ jobs:
         uses: matlab-actions/run-tests@v3
         with:
           source-folder: src
+          select-by-folder: tests
+          test-results-junit: test-results/results.xml
+          code-coverage-cobertura: code-coverage/coverage.xml
+
+      # Everything below runs even when tests fail, so failures are visible.
+
+      - name: Publish test results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: test-results/results.xml
+          check_name: MATLAB test results
+          comment_mode: off
+          # Fork PRs get a read-only token; fall back to the job summary only.
+          check_run: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+      - name: Publish code coverage summary
+        if: ${{ !cancelled() && hashFiles('code-coverage/coverage.xml') != '' }}
+        shell: python
+        run: |
+          import os
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("code-coverage/coverage.xml").getroot()
+
+          def pct(covered, valid):
+              return f"{100 * covered / valid:.1f}%" if valid else "n/a"
+
+          rows = []
+          for cls in root.iter("class"):
+              lines = cls.findall("lines/line")
+              hit = sum(int(l.get("hits", "0")) > 0 for l in lines)
+              missed = [l.get("number") for l in lines if int(l.get("hits", "0")) == 0]
+              rows.append((cls.get("filename"), hit, len(lines), missed))
+
+          total_hit = sum(r[1] for r in rows)
+          total_valid = sum(r[2] for r in rows)
+
+          md = ["## Code coverage (src/)", "",
+                f"**Line coverage: {pct(total_hit, total_valid)}** ({total_hit}/{total_valid} lines)", "",
+                "| File | Line coverage | Covered / Total | Uncovered lines |",
+                "|---|---:|---:|---|"]
+          for name, hit, valid, missed in sorted(rows):
+              md.append(f"| `{name}` | {pct(hit, valid)} | {hit}/{valid} | {', '.join(missed) or '—'} |")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("\n".join(md) + "\n")
+
+      - name: Upload test and coverage reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: matlab-test-and-coverage-reports
+          path: |
+            test-results/
+            code-coverage/
+          if-no-files-found: warn

@@ -2,3 +2,5 @@
 *.mex*
 slprj/
 codegen/
+test-results/
+code-coverage/
